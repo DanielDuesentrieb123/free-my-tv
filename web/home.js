@@ -66,6 +66,7 @@
     ['youtube', /youtube/, /^youtube$/i, ['#1C1C1E', '#09090A']],
     ['prime', /^amazon$/, /prime video|amazon/i, ['#2AA8FF', '#0A68D4']],
     ['disney', /disney/, /disney/i, ['#173584', '#08143F']],
+    ['sandmann', /^fmtv\.sandmann$/, /^sandmann$/i, ['#3A5BC7', '#16245E']],
     ['max', /hbo|wbd/, /^(hbo )?max$|hbo max/i, ['#5C30E8', '#221684']],
     ['appletv', /appletv|apple\.tv/, /apple tv/i, ['#1C1C1E', '#000000']],
     ['hulu', /^hulu/, /hulu/i, ['#1CE783', '#0B8F4E']],
@@ -292,11 +293,13 @@
 
   // MARK: - Focus
 
-  var Z = {TOP: 'top', CARDS: 'cards', SHELF: 'shelf', DRAWER: 'drawer', APPS: 'apps', SETTINGS: 'settings', EDIT: 'edit', LANG: 'lang'};
-  var st = {zone: Z.SHELF, top: 0, tab: 0, card: 0, shelf: 0, drawer: 0, grid: 0, row: 0, edit: 0, lang: 0};
-  var cards = [];
+  var Z = {TOP: 'top', CARDS: 'cards', SHELF: 'shelf', DRAWER: 'drawer', APPS: 'apps', SETTINGS: 'settings', EDIT: 'edit', LANG: 'lang',
+    BROWSE: 'browse'};
+  var st = {zone: Z.SHELF, top: 0, tab: 0, card: 0, shelf: 0, drawer: 0, grid: 0, row: 0, edit: 0, lang: 0, browse: 0};
+  var cards = [], cardsDrawn = '';   // what the cards show: picks are filled in place, so compare this, not them
 
-  function sheetOpen() { return st.zone === Z.APPS || st.zone === Z.SETTINGS || st.zone === Z.EDIT || st.zone === Z.LANG; }
+  function isSheet(zone) { return zone === Z.APPS || zone === Z.SETTINGS || zone === Z.EDIT || zone === Z.LANG || zone === Z.BROWSE; }
+  function sheetOpen() { return isSheet(st.zone); }
 
   function updateFocus() {
     var i, list;
@@ -319,6 +322,8 @@
     for (i = 0; i < list.length; i++) setClass(list[i], 'focus', st.zone === Z.APPS && st.grid === i);
     var rows = Math.max(1, Math.ceil(others.length / 5)), r = Math.floor(st.grid / 5), first = Math.max(0, Math.min(rows - 3, r - 1));
     $('apps').lastChild.style.webkitTransform = $('apps').lastChild.style.transform = 'translateY(' + (-first * 239) + 'px)';
+    focusBrowse();
+    placeCarousel();
     focusRows($('settings'), st.row, st.zone === Z.SETTINGS);
     focusRows($('shelfedit'), st.edit, st.zone === Z.EDIT);
     focusRows($('langpick'), st.lang, st.zone === Z.LANG);
@@ -388,29 +393,103 @@
   // MARK: - Picks and background
 
   function renderCards() {
-    var list = Data.picks(TAB_KIND[st.tab]);
+    var kind = TAB_KIND[st.tab], row = kind && carouselFor(kind);
+    var list = row && row.items.length ? row.items : Data.picks(kind);   // the hour's picks until the row has loaded
+    var wide = !!(row && row.items.length);
     var holder = $('cards');
     setClass(body, 'no-picks', !list.length);
-    var same = list.length === cards.length;
-    for (var i = 0; same && i < list.length; i++) same = list[i].id === cards[i].id && list[i].backdrop === cards[i].backdrop && list[i].meta === cards[i].meta;
-    if (same && holder.children.length === list.length) return;
+    setClass(holder, 'carousel', wide);
+    var drawn = (wide ? 'row:' : '') + list.map(function (x) {
+      return [x.id, x.backdrop, x.meta, x.title, x.trailer ? 1 : 0, x.rank || ''].join('|');
+    }).join('\n');
     cards = list;
+    if (drawn === cardsDrawn && holder.children.length === list.length) { placeCarousel(); return; }
+    cardsDrawn = drawn;
     holder.innerHTML = '';
     var rects = [[80, 1040], [1160, 320], [1520, 320]];
     for (var c = 0; c < list.length; c++) {
       var p = list[c], card = el('div', 'card', holder);
-      card.style.left = rects[c][0] + 'px';
-      card.style.width = rects[c][1] + 'px';
+      card.style.left = (wide ? CAROUSEL_LEFT + c * CAROUSEL_STEP : rects[c][0]) + 'px';
+      card.style.width = (wide ? CAROUSEL_W : rects[c][1]) + 'px';
       var img = el('div', 'img', card);
-      img.style.backgroundImage = 'url(' + Data.image(p.backdrop, c === 0 ? 'w1280' : 'w780') + ')';
+      img.style.backgroundImage = 'url(' + Data.image(p.backdrop, c === 0 && !wide ? 'w1280' : 'w780') + ')';
+      if (p.rank) {
+        el('div', 'rank', card, String(p.rank));
+        el('div', 'top10', card, tr('Netflix Top 10'));
+      }
       el('div', 'name', card, p.title);
-      if (c === 0 && p.meta) el('div', 'meta', card, p.meta);
+      if ((c === 0 || wide) && p.meta) el('div', 'meta', card, p.meta);
+      if (p.trailer) {
+        var pill = el('div', 'trailer', card);
+        sym('play', pill);
+        el('span', '', pill, tr('Hold OK for the trailer'));
+      }
       hover(card, Z.CARDS, c);
     }
     st.card = Math.min(st.card, Math.max(0, list.length - 1));
     if (!list.length && st.zone === Z.CARDS) st.zone = Z.SHELF;
-    backdrop(list.length ? Data.image(list[0].backdrop, 'w300') : '');
+    backdrop(list.length ? Data.image(list[wide ? st.card : 0].backdrop, 'w300') : '');
+    placeCarousel();
     updateFocus();
+  }
+
+  // MARK: - Movies and Shows: a row to scroll, Netflix's Top 10 first, then what's popular on the TV's apps
+
+  var CAROUSEL_LEFT = 80, CAROUSEL_W = 560, CAROUSEL_STEP = 600;
+  var carousels = {};   // kind -> {items, page, more, loading, ranked}
+  var carouselTimer = 0;
+
+  function carouselFor(kind) {
+    if (!Data.hasKey()) return null;
+    var row = carousels[kind];
+    if (!row) { row = carousels[kind] = {items: [], page: 0, more: true, loading: false, ranked: false}; loadCarousel(kind); }
+    return row;
+  }
+
+  function loadCarousel(kind) {
+    var row = carousels[kind];
+    if (!row || row.loading || !row.more) return;
+    row.loading = true;
+    function add(list) {
+      var seen = {};
+      for (var i = 0; i < row.items.length; i++) seen[row.items[i].kind + row.items[i].id] = true;
+      for (var j = 0; j < list.length; j++) if (!seen[list[j].kind + list[j].id]) { row.items.push(list[j]); seen[list[j].kind + list[j].id] = true; }
+    }
+    function popular() {
+      Data.browse(kind, row.page + 1, function (err, list, more) {
+        row.loading = false;
+        if (!err) { row.page++; add(list); }
+        row.more = !err && more;
+        if (TAB_KIND[st.tab] === kind) renderCards();
+      });
+    }
+    if (row.ranked) { popular(); return; }
+    Data.netflixTop10(kind, function (ranked) {
+      row.ranked = true;
+      add(ranked);
+      popular();
+    });
+  }
+
+  /** The row slides (a transform, which old TVs animate) so the focused card and the next one are on screen. */
+  function placeCarousel() {
+    var holder = $('cards'), wide = hasClass(holder, 'carousel');
+    var first = wide ? Math.max(0, Math.min(st.card - 1, cards.length - 3)) : 0;
+    holder.style.webkitTransform = holder.style.transform = first ? 'translateX(' + (-first * CAROUSEL_STEP) + 'px)' : '';
+  }
+
+  /** The focused card in the row: its service and trailer once the focus rests on it, more titles near the end. */
+  function carouselFocused() {
+    var kind = TAB_KIND[st.tab], row = kind && carousels[kind];
+    if (!row || cards !== row.items) return;
+    if (st.card >= cards.length - 4) loadCarousel(kind);
+    backdrop(Data.image(cards[st.card].backdrop, 'w300'));
+    clearTimeout(carouselTimer);
+    var p = cards[st.card];
+    if (!p || p.detailed) return;
+    carouselTimer = setTimeout(function () {
+      Data.details(p, function () { if (cards === row.items) renderCards(); });
+    }, 350);
   }
 
   var bgUrl = null, bgFront = 'bgA';
@@ -528,6 +607,7 @@
       drawerItems.push({label: x.label || tr('Live TV'), symbol: x.symbol, off: !x.connected, run: launcher(x.id, x.label)});
     }
     drawerInputs = drawerItems.length;
+    if (Data.hasKey()) drawerItems.push({label: tr('Browse'), symbol: 'sparkles', run: function () { openBrowse('movie'); }});
     drawerItems.push({label: tr('All Apps'), symbol: 'apps', run: openApps});
     drawerItems.push({label: tr('Home Settings'), symbol: 'settings', run: openSettings});
     drawerItems.push({label: tr('TV Settings'), symbol: 'tv_settings', run: tvSettings});
@@ -632,6 +712,130 @@
     updateFocus();
   }
 
+  // MARK: - Browse: everything popular on the TV's streaming apps, movies or shows, to scroll through
+
+  var BROWSE_COLS = 4, BROWSE_W = 400, BROWSE_STEP_X = 440, BROWSE_STEP_Y = 330, BROWSE_LEFT = 110, BROWSE_TOP = 230;
+  var browseKind = 'movie', browseItems = [], browsePage = 0, browseMore = false, browseLoading = false, browseToken = 0;
+  var browseDetailTimer = 0;
+
+  function openBrowse(kind) {
+    browseKind = kind;
+    browseItems = [];
+    browsePage = 0;
+    browseMore = true;
+    browseToken++;
+    st.zone = Z.BROWSE;
+    st.browse = 0;
+    renderBrowse();
+    setClass($('browse'), 'open', true);
+    loadBrowse();
+    updateFocus();
+  }
+
+  function loadBrowse() {
+    if (browseLoading || !browseMore) return;
+    browseLoading = true;
+    var token = browseToken;
+    Data.browse(browseKind, browsePage + 1, function (err, list, more) {
+      if (token !== browseToken) return;
+      browseLoading = false;
+      if (err && !browseItems.length) { toast(tr("Couldn't load the list")); browseMore = false; renderBrowse(); return; }
+      browsePage++;
+      browseMore = !err && more;
+      var seen = {};
+      for (var i = 0; i < browseItems.length; i++) seen[browseItems[i].kind + browseItems[i].id] = true;
+      for (var j = 0; j < list.length; j++) if (!seen[list[j].kind + list[j].id]) browseItems.push(list[j]);
+      renderBrowse();
+      updateFocus();
+      browseFocused();
+    });
+  }
+
+  function renderBrowse() {
+    var sheet = $('browse'), tabs = sheet.children[0], hint = sheet.children[1], grid = sheet.children[2];
+    tabs.innerHTML = '';
+    var kinds = [['movie', tr('Movies')], ['tv', tr('Shows')]];
+    for (var t = 0; t < kinds.length; t++) {
+      var tab = el('span', 'tab' + (kinds[t][0] === browseKind ? ' on' : ''), tabs, kinds[t][1]);
+      tab.setAttribute('data-kind', kinds[t][0]);
+    }
+    hint.textContent = browseItems.length || !browseMore
+        ? tr('Popular on your streaming apps  ·  OK opens  ·  hold OK for the trailer') : tr('Loading…');
+    grid.innerHTML = '';
+    for (var i = 0; i < browseItems.length; i++) {
+      var p = browseItems[i], r = Math.floor(i / BROWSE_COLS), c = i % BROWSE_COLS, cell = el('div', 'bcell', grid);
+      cell.style.left = (BROWSE_LEFT + c * BROWSE_STEP_X) + 'px';
+      cell.style.top = (BROWSE_TOP + r * BROWSE_STEP_Y) + 'px';
+      cell.style.width = BROWSE_W + 'px';
+      el('div', 'img', cell).style.backgroundImage = 'url(' + Data.image(p.backdrop, 'w500') + ')';
+      el('div', 'name', cell, p.title);
+      el('div', 'meta', cell, p.meta || '');
+      hover(cell, Z.BROWSE, i);
+    }
+  }
+
+  function focusBrowse() {
+    var on = st.zone === Z.BROWSE, sheet = $('browse');
+    var tabs = sheet.children[0].children, cells = sheet.children[2].children;
+    for (var t = 0; t < tabs.length; t++) setClass(tabs[t], 'focus', on && st.browse < 0 && tabs[t].getAttribute('data-kind') === browseKind);
+    for (var i = 0; i < cells.length; i++) setClass(cells[i], 'focus', on && st.browse === i);
+    var r = Math.max(0, Math.floor(st.browse / BROWSE_COLS)), first = Math.max(0, r - 1);
+    var g = sheet.children[2];
+    g.style.webkitTransform = g.style.transform = 'translateY(' + (-first * BROWSE_STEP_Y) + 'px)';
+  }
+
+  function moveBrowse(dx, dy) {
+    if (st.browse < 0) {   // on the Movies / Shows tabs
+      if (dx && (dx > 0) === (browseKind === 'movie')) { openBrowse(browseKind === 'movie' ? 'tv' : 'movie'); st.browse = -1; updateFocus(); }
+      else if (dy > 0 && browseItems.length) { st.browse = 0; browseFocused(); }
+      updateFocus();
+      return;
+    }
+    var i = st.browse, row = Math.floor(i / BROWSE_COLS);
+    if (dy < 0 && row === 0) st.browse = -1;
+    else if (dx) { var n = i + dx; if (n >= 0 && n < browseItems.length && Math.floor(n / BROWSE_COLS) === row) st.browse = n; }
+    else if (dy) {
+      var m = i + dy * BROWSE_COLS;
+      // Past the end while more is on its way: stay in this column until it arrives.
+      if (m >= 0 && (m < browseItems.length || !browseMore)) st.browse = Math.min(m, browseItems.length - 1);
+    }
+    if (Math.floor(st.browse / BROWSE_COLS) >= Math.floor((browseItems.length - 1) / BROWSE_COLS) - 2) loadBrowse();
+    updateFocus();
+    browseFocused();
+  }
+
+  /** The focused title's service and trailer, fetched once the focus rests on it: its line then says where it's on. */
+  function browseFocused() {
+    clearTimeout(browseDetailTimer);
+    var p = browseItems[st.browse];
+    if (!p || p.detailed) return;
+    browseDetailTimer = setTimeout(function () {
+      Data.details(p, function () {
+        var cell = $('browse').children[2].children[browseItems.indexOf(p)];
+        if (cell) cell.lastChild.textContent = p.meta || '';
+      });
+    }, 350);
+  }
+
+  /** A title from the browser: its details first (they say which app has it), then the app. */
+  function openPick(p) {
+    function go() {
+      var app = p.app && Data.appFor(p.app);
+      if (app) launcher(app.id, app.title)();
+      else toast(tr('None of your apps streams this'));
+    }
+    if (p.detailed) go();
+    else Data.details(p, function (err) { if (err) toast(tr("Couldn't load the list")); else go(); });
+  }
+
+  /** Long OK or Play on a title: the focused pick's trailer, or the focused browse title's (its details first). */
+  function trailerHere() {
+    var p = st.zone === Z.BROWSE ? browseItems[st.browse] : cards[st.card];
+    if (!p) return;
+    if (p.detailed) openTrailer(p);
+    else Data.details(p, function () { openTrailer(p); });
+  }
+
   // MARK: - All Apps
 
   function renderApps() {
@@ -659,6 +863,8 @@
 
   function closeSheets() {
     setClass($('apps'), 'open', false);
+    setClass($('browse'), 'open', false);
+    browseToken++;
     setClass($('settings'), 'open', false);
     setClass($('shelfedit'), 'open', false);
     setClass($('langpick'), 'open', false);
@@ -854,6 +1060,7 @@
     return function () {
       TV.launch(id, null, function (ok) {
         if (!ok) toast(trf("Couldn't open {app}.", {app: name || id}));
+        else if (id.indexOf('source:') !== 0) TV.watchReturn(id);   // not the inputs: they're the TV's own viewer
       });
     };
   }
@@ -879,16 +1086,20 @@
         return;
       case Z.CARDS:
         var p = cards[st.card], app = p && Data.appFor(p.app);
-        if (app) launcher(app.id, app.title)();
+        if (p && !p.detailed) openPick(p);   // a title in the row: its details first
+        else if (app) launcher(app.id, app.title)();
         return;
       case Z.SHELF:
-        if (shelf[st.shelf]) launcher(shelf[st.shelf].id, shelf[st.shelf].title)();
+        if (shelf[st.shelf]) openApp(shelf[st.shelf]);
         return;
       case Z.DRAWER:
         if (drawerItems[st.drawer]) drawerItems[st.drawer].run();
         return;
       case Z.APPS:
-        if (others[st.grid]) launcher(others[st.grid].id, others[st.grid].title)();
+        if (others[st.grid]) openApp(others[st.grid]);
+        return;
+      case Z.BROWSE:
+        if (st.browse >= 0 && browseItems[st.browse]) openPick(browseItems[st.browse]);
         return;
       case Z.SETTINGS:
         if (rowsNow[st.row]) { rowsNow[st.row].step(1); if (st.zone === Z.SETTINGS) renderSettings(); }
@@ -905,6 +1116,7 @@
   function selectTab(i) {
     if (i === st.tab) return;
     st.tab = i;
+    st.card = 0;
     renderCards();
   }
 
@@ -920,7 +1132,7 @@
         }
         break;
       case Z.CARDS:
-        if (dx) st.card = Math.max(0, Math.min(cards.length - 1, st.card + dx));
+        if (dx) { st.card = Math.max(0, Math.min(cards.length - 1, st.card + dx)); placeCarousel(); carouselFocused(); }
         else if (dy < 0) { st.zone = Z.TOP; st.top = st.tab; }
         else if (shelf.length) { st.zone = Z.SHELF; st.shelf = nearest(tiles, centerX(cardNodes[st.card])); }
         break;
@@ -937,6 +1149,9 @@
         if (dx) st.drawer = Math.max(0, Math.min(drawerItems.length - 1, st.drawer + dx));
         else if (dy < 0) { closeDrawer(); return; }
         break;
+      case Z.BROWSE:
+        moveBrowse(dx, dy);
+        return;
       case Z.APPS:
         var g = st.grid + dx + dy * 5;
         if (g >= 0 && g < others.length && (dx === 0 || Math.floor(g / 5) === Math.floor(st.grid / 5))) st.grid = g;
@@ -971,7 +1186,7 @@
   /** The pointer focuses what it's over (the Magic Remote, or a mouse when previewing). */
   function hover(node, zone, index) {
     node.onmouseover = function () {
-      if (saverOn || (sheetOpen() !== (zone === Z.APPS || zone === Z.SETTINGS || zone === Z.EDIT || zone === Z.LANG))) return;
+      if (saverOn || sheetOpen() !== isSheet(zone)) return;
       if (zone === Z.DRAWER && st.zone !== Z.DRAWER) return;
       if (zone !== Z.DRAWER && st.zone === Z.DRAWER && zone !== Z.SHELF) return;
       if (zone === Z.SHELF && st.zone === Z.DRAWER) closeDrawer();
@@ -984,9 +1199,146 @@
       else if (zone === Z.SETTINGS) st.row = index;
       else if (zone === Z.EDIT) st.edit = index;
       else if (zone === Z.LANG) st.lang = index;
+      else if (zone === Z.BROWSE) { st.browse = index; browseFocused(); }
       updateFocus();
     };
     node.onclick = function () { node.onmouseover(); activate(); };
+  }
+
+  // MARK: - Player: a pick's trailer (YouTube) or the Sandmännchen (ARD Mediathek), full screen
+
+  var playing = '', hintTimer = 0, playToken = 0, episodes = [], episode = 0;
+
+  /** The player's title and keys, for a few seconds. */
+  function playerHint(name, keys) {
+    var t = $('trailer'), old = t.querySelector('.hint');
+    if (old) t.removeChild(old);
+    var hint = el('div', 'hint', t);
+    el('div', 'name', hint, name);
+    el('div', 'keys', hint, keys);
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(function () { setClass(hint, 'gone', true); }, 4000);
+  }
+
+  function openPlayer(kind) {
+    var t = $('trailer');
+    t.innerHTML = '';
+    playing = kind;
+    playToken++;
+    setClass(t, 'on', true);
+    return t;
+  }
+
+  function closePlayer(failed) {
+    if (!playing) return;
+    var was = playing;
+    playing = '';
+    playToken++;   // answers still on their way find nothing to play
+    clearTimeout(hintTimer);
+    var t = $('trailer'), v = t.querySelector('video');
+    if (v) { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {} }   // frees the TV's decoder
+    setClass(t, 'on', false);
+    t.innerHTML = '';   // stops the video
+    idleAt = Date.now();
+    if (failed) toast(was === 'trailer' ? tr("Couldn't play the trailer") : tr("Couldn't play the Sandmännchen"));
+  }
+
+  /** A title's trailer (the focused pick's by default), from YouTube. Back, OK or Play closes it; so does its end. */
+  function openTrailer(title) {
+    var p = title || cards[st.card];
+    if (!p || !p.trailer) { toast(tr('No trailer for this one')); return; }
+    var t = openPlayer('trailer');
+    var f = document.createElement('iframe');
+    if (TRAILER_PAGE) {
+      // Installed, the app is a local file: YouTube gets no address from it and refuses (error 153). The page plays it.
+      f.src = TRAILER_PAGE + (TRAILER_PAGE.indexOf('?') >= 0 ? '&' : '?') + 'v=' + p.trailer + '&hl=' + I18N.base;
+    } else {
+      var origin = /^https?:$/.test(location.protocol) ? '&origin=' + encodeURIComponent(location.protocol + '//' + location.host) : '';
+      f.src = 'https://www.youtube-nocookie.com/embed/' + p.trailer + '?autoplay=1&controls=0&rel=0&iv_load_policy=3'
+          + '&playsinline=1&enablejsapi=1&hl=' + I18N.base + origin;
+      f.onload = function () {
+        try { f.contentWindow.postMessage('{"event":"listening","id":1}', '*'); } catch (e) {}   // so the player reports its end
+      };
+    }
+    f.setAttribute('allow', 'autoplay; encrypted-media');
+    f.setAttribute('frameborder', '0');
+    f.tabIndex = -1;   // the remote's keys stay with the home screen
+    t.appendChild(f);
+    playerHint(p.title, tr('Back closes the trailer'));
+  }
+
+  /** trailer_page in config.properties: docs/trailer/index.html, hosted (see openTrailer). */
+  var TRAILER_PAGE = CONFIG.trailerPage || '';
+  var TRAILER_ORIGIN = (/^(https?:\/\/[^\/?#]+)/.exec(TRAILER_PAGE) || [])[1] || '';
+
+  // The player says when the video ended or can't play here: YouTube's own, or the trailer page passing it on.
+  window.addEventListener('message', function (e) {
+    var page = TRAILER_ORIGIN && e.origin === TRAILER_ORIGIN;
+    if (playing !== 'trailer' || !(page || /youtube/.test(e.origin || ''))) return;
+    var d;
+    try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch (x) { return; }
+    if (!d) return;
+    if (page) { if (d.fmtv === 'ended' || d.fmtv === 'error') closePlayer(d.fmtv === 'error'); return; }
+    if (d.event === 'onError') closePlayer(true);
+    else if ((d.event === 'onStateChange' && d.info === 0) || (d.event === 'infoDelivery' && d.info && d.info.playerState === 0)) closePlayer(false);
+  });
+
+  var SANDMANN_ID = 'fmtv.sandmann';
+
+  /** The Sandmännchen's newest episode, straight from the ARD Mediathek; ◀ ▶ older and newer ones, OK pauses. */
+  function openSandmann() {
+    var t = openPlayer('sandmann'), token = playToken;
+    var v = el('video', '', t);
+    v.autoplay = true;
+    v.onended = function () { closePlayer(false); };
+    v.onerror = function () { if (playing === 'sandmann' && v.getAttribute('src')) closePlayer(true); };
+    Data.sandmannEpisodes(function (err, list) {
+      if (token !== playToken) return;
+      if (!list.length) { closePlayer(true); return; }
+      episodes = list;
+      playEpisode(0);
+    });
+  }
+
+  function playEpisode(i) {
+    if (i < 0 || i >= episodes.length) return;
+    episode = i;
+    var e = episodes[i], token = ++playToken, v = $('trailer').querySelector('video');
+    try { v.pause(); } catch (x) {}
+    v.poster = e.image;   // the episode's picture while its video loads
+    playerHint(e.title, (e.date ? e.date + '  ·  ' : '') + tr('◀ ▶ other episodes  ·  Back closes'));
+    Data.sandmannVideo(e.id, function (err, url) {
+      if (token !== playToken) return;
+      if (err) { closePlayer(true); return; }
+      v.src = url;
+      try { var started = v.play(); if (started && started['catch']) started['catch'](function () {}); } catch (x) {}
+    });
+  }
+
+  function pauseSandmann() {
+    var v = $('trailer').querySelector('video'), e = episodes[episode];
+    if (!v || !e) return;
+    if (v.paused) { try { v.play(); } catch (x) {} playerHint(e.title, tr('◀ ▶ other episodes  ·  Back closes')); }
+    else { v.pause(); playerHint(e.title, tr('Paused  ·  OK plays on')); }
+  }
+
+  /** The remote while the player is up. A held OK repeats: the press that opened it doesn't also close or pause it. */
+  function playerKey(k, repeat) {
+    if (k === TV.keys.back || k === 27 || k === 8) { closePlayer(false); return; }
+    if (k === TV.keys.ok && repeat) return;
+    if (playing === 'trailer') {
+      if (k === TV.keys.ok || TV.isPlay(k)) closePlayer(false);
+      return;
+    }
+    if (k === TV.keys.ok || TV.isPlay(k)) pauseSandmann();
+    else if (k === TV.keys.left) playEpisode(episode + 1);    // older
+    else if (k === TV.keys.right) playEpisode(episode - 1);   // newer
+  }
+
+  /** Opens an app, or plays what Free My TV plays itself. */
+  function openApp(app) {
+    if (app.id === SANDMANN_ID) openSandmann();
+    else launcher(app.id, app.title)();
   }
 
   // MARK: - Toast
@@ -1074,9 +1426,22 @@
 
   // MARK: - Keys
 
+  var okHeld = 0, okLong = false;   // OK held on a pick opens its trailer
+  var okDown = false;               // OK is down: later keydowns for it are the key repeating
+
   document.addEventListener('keydown', function (e) {
-    var k = e.keyCode;
+    var k = e.keyCode, repeat = k === TV.keys.ok && okDown;
+    if (k === TV.keys.ok) okDown = true;
     if (poke()) { e.preventDefault(); return; }   // the first press only wakes the screen
+    if (playing) { playerKey(k, repeat); e.preventDefault(); return; }
+    var onTitle = st.zone === Z.CARDS || (st.zone === Z.BROWSE && st.browse >= 0);
+    if (onTitle && k === TV.keys.ok) {
+      // A short press opens the app (on release), a long one the trailer.
+      if (!okHeld && !okLong) okHeld = setTimeout(function () { okHeld = 0; okLong = true; trailerHere(); }, 600);
+      e.preventDefault();
+      return;
+    }
+    if (onTitle && TV.isPlay(k)) { trailerHere(); e.preventDefault(); return; }
     if (k === TV.keys.left) move(-1, 0);
     else if (k === TV.keys.right) move(1, 0);
     else if (k === TV.keys.up) move(0, -1);
@@ -1086,6 +1451,12 @@
     else return;
     e.preventDefault();
   });
+  document.addEventListener('keyup', function (e) {
+    if (e.keyCode !== TV.keys.ok) return;
+    okDown = false;
+    if (okHeld) { clearTimeout(okHeld); okHeld = 0; activate(); }
+    okLong = false;
+  });
   document.addEventListener('mousemove', function () { poke(); });
 
   // MARK: - Start
@@ -1093,7 +1464,7 @@
   function renderAll() {
     renderTop();
     renderQuotes();
-    cards = [];
+    cardsDrawn = '';
     renderCards();
     renderShelf();
     renderDrawer();
@@ -1113,7 +1484,8 @@
 
   function loadApps(done) {
     TV.apps(function (list) {
-      apps = list.filter(function (a) { return !hidden(a); });
+      // The Sandmännchen isn't an app on the TV: Free My TV plays it (hide_apps=sandmann leaves it out).
+      apps = list.concat([{id: SANDMANN_ID, title: 'Sandmann', icon: '', color: '#3A5BC7'}]).filter(function (a) { return !hidden(a); });
       Data.setApps(apps);
       pickShelf();
       TV.inputs(function (list2) {
@@ -1126,6 +1498,7 @@
   /** Back to the home screen (the app was opened again): the shelf, everything closed, the first tab. */
   function reset() {
     hideSaver();
+    closePlayer(false);
     closeSheets();
     st.zone = Z.SHELF;
     st.shelf = 0;
@@ -1151,7 +1524,9 @@
   document.addEventListener('webOSRelaunch', reopened);   // LG: opened again while running
   window.addEventListener('appcontrol', reopened);        // Samsung: the same
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { hideSaver(); return; }
+    TV.devlog(document.hidden ? 'hidden' : 'visible');
+    if (document.hidden) { hideSaver(); closePlayer(false); return; }
+    TV.stopWatch();
     idleAt = Date.now();
     loadApps(function () { renderShelf(); renderDrawer(); updateFocus(); Data.refresh(); });
   });
@@ -1159,7 +1534,7 @@
   I18N.set(Prefs.language());
   checkNight();   // now, from the last forecast: not after the TV lists its apps, with the day look until then
   // LG's screensaver waits only when ours will show: not under a sheet (ours waits there), and not without photos.
-  TV.holdScreenSaver(function () { return !sheetOpen() && saverPhotos().length > 0; });
+  TV.holdScreenSaver(function () { return !!playing || (!sheetOpen() && saverPhotos().length > 0); });
   fit();
   renderTop();
   tickClock();
@@ -1170,10 +1545,11 @@
   setInterval(function () {
     checkNight();
     Data.refresh();
-    if (!saverOn && !sheetOpen() && Date.now() - idleAt > SAVER_AFTER) showSaver();
+    if (!saverOn && !sheetOpen() && !playing && Date.now() - idleAt > SAVER_AFTER) showSaver();
     if (saverOn) tickSaverClock($('saver').querySelector('.clock'));
   }, 30000);
 
   // For the browser preview and tests.
-  window.FreeMyTV = {state: st, move: move, activate: activate, back: back, showSaver: showSaver, hideSaver: hideSaver, toast: toast};
+  window.FreeMyTV = {state: st, move: move, activate: activate, back: back, showSaver: showSaver, hideSaver: hideSaver, toast: toast,
+    openTrailer: openTrailer, openSandmann: openSandmann, closePlayer: closePlayer};
 })();

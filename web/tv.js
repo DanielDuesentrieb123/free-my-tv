@@ -10,6 +10,14 @@ var TV = (function () {
 
   var webos = typeof window.PalmServiceBridge !== 'undefined';
   var samsung = !webos && typeof window.tizen !== 'undefined' && !!window.tizen.application;
+
+  // Samsung hands the app only the arrows, OK and Back unless it asks for more: the play keys open a pick's trailer.
+  if (samsung) {
+    var playKeys = ['MediaPlay', 'MediaPlayPause'];
+    for (var pk = 0; pk < playKeys.length; pk++) {
+      try { window.tizen.tvinputdevice.registerKey(playKeys[pk]); } catch (e) {}   // a TV without the key throws
+    }
+  }
   var calls = [];   // a bridge is collected if nothing holds it before its reply arrives
 
   /** One Luna call; done(result) with null on failure. */
@@ -218,6 +226,7 @@ var TV = (function () {
         // The built-in Netflix stays only when the store's Netflix isn't installed.
         var store = out.some(function (x) { return /\.Netflix$/.test(x.id); });
         if (store) out = out.filter(function (x) { return x.id.indexOf('org.tizen.netflix') !== 0; });
+        userApps = out.map(function (x) { return x.id; });
         // Smart Hub keeps its own order, which isn't readable: the same alphabetical order as All Apps elsewhere.
         out.sort(function (x, y) { var a = x.title.toLowerCase(), b = y.title.toLowerCase(); return a < b ? -1 : a > b ? 1 : 0; });
         done(out);
@@ -241,6 +250,7 @@ var TV = (function () {
       if (done) done(false);
     }
   }
+
 
   /**
    * The video sources the TV reports ([{type: 'TV' | 'HDMI' | ..., number}]), or null when it doesn't tell. With `all`,
@@ -296,6 +306,75 @@ var TV = (function () {
       }
       done(list);
     });
+  }
+
+  // MARK: - Back to Free My TV (Samsung)
+
+  // Samsung's Home and an app's own exit lead to Samsung's home screen. While an app opened from here runs, Free My TV
+  // keeps an eye on it (background-support in config.xml) and comes back to the front once it has closed.
+  var SELF_ID = 'FreeMyTVio.FreeMyTV';
+  var watch = null;   // {id, timer, seen, ticks, before}
+  var userApps = [];  // the apps in the TV's list (samsungApps): not the platform's services, which come and go
+
+  /** dev_log_url in config.properties: what the watch sees, sent to a computer while testing. */
+  function devlog(what) {
+    var url = window.CONFIG && window.CONFIG.devLogUrl;
+    if (!url) return;
+    try {
+      var x = new XMLHttpRequest();
+      x.open('POST', url, true);
+      x.send(JSON.stringify({t: new Date().toISOString().slice(11, 19), hidden: document.hidden, what: what}));
+    } catch (e) {}
+  }
+
+  function runningApps(done) {
+    try {
+      window.tizen.application.getAppsContext(function (list) {
+        done(list.map(function (c) { return c.appId; }));
+      }, function (e) { devlog('getAppsContext failed: ' + (e && e.name)); done(null); });
+    } catch (e) {
+      devlog('getAppsContext threw: ' + e.message);
+      done(null);
+    }
+  }
+
+  function stopWatch() {
+    if (watch) { clearInterval(watch.timer); watch = null; }
+  }
+
+  function watchReturn(id) {
+    stopWatch();
+    if (!samsung) return;
+    var w = watch = {id: id, seen: false, ticks: 0};
+    w.timer = setInterval(function () {
+      if (watch !== w) return;
+      if (++w.ticks > 5400) { stopWatch(); return; }   // gives up after 3 hours
+      runningApps(function (ids) {
+        if (!ids || watch !== w) return;
+        // Another app started since (one that wasn't running when this one opened): the person moved on, so
+        // Free My TV mustn't jump in later when this one closes.
+        var started = w.before ? ids.filter(function (x) {
+          return x !== w.id && w.before.indexOf(x) < 0 && userApps.indexOf(x) >= 0;
+        }) : [];
+        devlog({tick: w.ticks, watching: w.id, running: ids.length, started: started});
+        if (!w.before) w.before = ids;
+        else if (started.length) { devlog('another app started: stop'); stopWatch(); return; }
+        if (ids.indexOf(w.id) >= 0) { w.seen = true; return; }
+        if (!w.seen) return;
+        stopWatch();
+        devlog('closed: coming back');
+        try { window.tizen.application.launch(SELF_ID); } catch (e) { devlog('launch threw: ' + e.message); }
+      });
+    }, 2000);
+  }
+
+  if (samsung) {
+    devlog({start: true, statusListener: !!window.tizen.application.addAppStatusChangeListener,
+      version: (function () {
+        try { return window.tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'); } catch (e) { return '?'; } })()});
+    try {
+      window.tizen.application.addAppStatusChangeListener(function (id, status) { devlog('status ' + id + ' ' + status); });
+    } catch (e) { devlog('statusListener threw: ' + e.message); }
   }
 
   /** Samsung's settings: whichever app answers the platform's "settings" request, else the TV's menu (Tizen 3). */
@@ -411,6 +490,11 @@ var TV = (function () {
       if (window.PalmSystem && window.PalmSystem.platformBack) window.PalmSystem.platformBack();
     },
 
+    /** Samsung: brings Free My TV back once the app just opened from here has closed; stopWatch() ends it. */
+    watchReturn: watchReturn,
+    stopWatch: stopWatch,
+    devlog: devlog,
+
     /** The TV's time zone ("America/Sao_Paulo"), or ''. */
     zone: function () {
       if (samsung) {
@@ -420,6 +504,9 @@ var TV = (function () {
     },
 
     /** Key codes: the arrows, OK and the TV's Back (LG 461, Samsung 10009). */
-    keys: {left: 37, up: 38, right: 39, down: 40, ok: 13, back: samsung ? 10009 : 461}
+    keys: {left: 37, up: 38, right: 39, down: 40, ok: 13, back: samsung ? 10009 : 461},
+
+    /** Play (415 on both) and Play/Pause (Samsung 10252, a keyboard's media key 179). */
+    isPlay: function (k) { return k === 415 || k === 10252 || k === 179; }
   };
 })();

@@ -227,7 +227,13 @@ var Data = (function () {
     ['max', 'max', /hbo|wbd|\.max/, /^(hbo )?max$|hbo max/i, 'Max'],
     ['apple tv', 'appletv', /appletv|apple\.tv/, /apple tv/i, 'Apple TV'],
     ['hotstar', 'hotstar', /hotstar/, /hotstar/i, 'JioHotstar'],
-    ['crunchyroll', 'crunchyroll', /crunchyroll/, /crunchyroll/i, 'Crunchyroll']
+    ['crunchyroll', 'crunchyroll', /crunchyroll/, /crunchyroll/i, 'Crunchyroll'],
+    ['ard mediathek', 'ard', /\.ARD$|ardmediathek/i, /ard mediathek/i, 'ARD Mediathek'],
+    ['zdf', 'zdf', /zdf/i, /^zdf/i, 'ZDF'],
+    ['rtl+', 'rtlplus', /tvnow|rtlplus/i, /^rtl\+/i, 'RTL+'],
+    ['joyn', 'joyn', /\.7tv$|joyn/i, /^joyn/i, 'Joyn'],
+    ['wow', 'wow', /skyonline|\.wow$/i, /^wow$/i, 'WOW'],
+    ['arte', 'arte', /\.arte$/i, /^arte$/i, 'ARTE']
   ];
 
   var installed = [];   // the TV's apps, from TV.apps()
@@ -340,13 +346,27 @@ var Data = (function () {
     return best;
   }
 
-  /** Genre, runtime or seasons, and the service it's on among the TV's apps. */
+  /** The trailer's YouTube id, or '': English first, then the TV's language; official trailers before teasers. */
+  function bestTrailer(videos) {
+    var list = videos && videos.results, best = '', score = -1;
+    for (var i = 0; list && i < list.length; i++) {
+      var v = list[i];
+      if (v.site !== 'YouTube' || !v.key || (v.type !== 'Trailer' && v.type !== 'Teaser')) continue;
+      var s = (v.iso_639_1 === 'en' ? 400 : v.iso_639_1 === I18N.base ? 200 : 0) + (v.type === 'Trailer' ? 20 : 0)
+          + (v.official ? 10 : 0);
+      if (s > score) { score = s; best = v.key; }
+    }
+    return best;
+  }
+
+  /** Genre, runtime or seasons, the service it's on among the TV's apps, and the trailer. */
   function details(p, done) {
-    tmdb('/' + p.kind + '/' + p.id + '?language=' + lang() + '&append_to_response=watch/providers,images&include_image_language=null,'
-        + I18N.base + ',en', function (err, o) {
+    tmdb('/' + p.kind + '/' + p.id + '?language=' + lang() + '&append_to_response=watch/providers,images,videos&include_image_language=null,'
+        + I18N.base + ',en&include_video_language=en,' + I18N.base + ',null', function (err, o) {
       if (err) { done(err); return; }
       var best = bestBackdrop(o.images);
       if (best) p.backdrop = best;
+      p.trailer = bestTrailer(o.videos);
       var parts = [];
       if (p.kind === 'tv') parts.push(tr('Series'));
       if (o.genres && o.genres.length) {
@@ -359,11 +379,13 @@ var Data = (function () {
         parts.push(plural('plural|one:{n} season|other:{n} seasons', o.number_of_seasons));
       }
       var wp = o['watch/providers'], here = wp && wp.results && wp.results[REGION], flat = here && here.flatrate;
+      var ranked = !!p.rank;   // a Netflix Top 10 title opens Netflix, even when another app has it too
       p.app = null;
       for (var i = 0; flat && i < flat.length && !p.app; i++) {
         var s = service(flat[i].provider_name, flat[i].provider_id);
-        if (s && appFor(s[1])) { p.app = s[1]; p.service = s[4]; }
+        if (s && appFor(s[1]) && (!ranked || s[1] === 'netflix')) { p.app = s[1]; p.service = s[4]; }
       }
+      if (ranked && !p.app && appFor('netflix')) { p.app = 'netflix'; p.service = 'Netflix'; }
       if (p.service && p.app) parts.push(p.service);
       p.meta = parts.join(' · ');
       title(p, o, function () {
@@ -466,7 +488,8 @@ var Data = (function () {
     if (st === stamp && failedAt && t - failedAt < 10 * 60000 && t >= failedAt) return;
     var stale = st !== stamp || p !== period || t - listAt > 6 * 3600000 || t < listAt || !picks.length || listLang !== I18N.lang;
     var wanted = all(), missing = false;
-    for (var i = 0; i < wanted.length; i++) missing = missing || !wanted[i].detailed;
+    // Picks detailed before trailers existed have none yet (undefined; '' is "no trailer").
+    for (var i = 0; i < wanted.length; i++) missing = missing || !wanted[i].detailed || wanted[i].trailer === undefined;
     if (!stale && !missing) return;
     fetchingRecs = true;
     stamp = st;
@@ -477,7 +500,7 @@ var Data = (function () {
       changed();
     }
     function detailWanted() {
-      var todo = all().filter(function (x) { return !x.detailed; });
+      var todo = all().filter(function (x) { return !x.detailed || x.trailer === undefined; });
       each(todo, function (x, next) { details(x, function () { next(); }); }, function () { finish(null); });
     }
     if (stale) {
@@ -503,6 +526,151 @@ var Data = (function () {
     return out;
   }
 
+  // MARK: - Browse (TMDB): everything popular on the TV's streaming apps, a page at a time
+
+  var providerIds = null;   // TMDB's ids of the services whose app is on the TV
+
+  function providers(done) {
+    if (providerIds) { done(null, providerIds); return; }
+    tmdb('/watch/providers/movie?language=' + lang() + '&watch_region=' + REGION, function (err, res) {
+      if (err) { done(err); return; }
+      var ids = [];
+      for (var i = 0; res.results && i < res.results.length; i++) {
+        var s = service(res.results[i].provider_name, res.results[i].provider_id);
+        if (s && appFor(s[1])) ids.push(res.results[i].provider_id);
+      }
+      if (!ids.length) { done(new Error("none of the TV's streaming apps are on TMDB")); return; }
+      providerIds = ids;
+      done(null, ids);
+    });
+  }
+
+  /** Page `page` (from 1) of the movies or shows ('movie' / 'tv') popular on the TV's apps: done(error, [pick], more). */
+  function browse(kind, page, done) {
+    if (!KEY) { done(new Error('no TMDB key'), [], false); return; }
+    providers(function (err, ids) {
+      if (err) { done(err, [], false); return; }
+      tmdb('/discover/' + kind + '?language=' + lang() + '&watch_region=' + REGION + '&with_watch_monetization_types=flatrate'
+          + '&include_adult=false&sort_by=popularity.desc&page=' + page + '&with_watch_providers=' + encodeURIComponent(ids.join('|'))
+          + (CONFIG.hideAnimation ? '&without_genres=' + ANIMATION : ''), function (e, r) {
+        if (e) { done(e, [], false); return; }
+        var out = [];
+        for (var j = 0; r.results && j < r.results.length; j++) addPick(out, r.results[j], kind);
+        done(null, out, page < Math.min(r.total_pages || 1, 10));   // 10 pages: 200 titles is plenty to scroll
+      });
+    });
+  }
+
+  // MARK: - Netflix Top 10 (official, weekly: top10_url in config.properties, see docs/trailer/top10.py)
+
+  var TOP10_URL = CONFIG.top10Url || '';
+  var top10 = stored('top10');   // {week, at, lang, movie: [pick], tv: [pick]}, matched to TMDB once a week
+  var top10Waiting = null;       // callbacks while it's being fetched
+
+  /** The TMDB match for a Top 10 title: of the first results, the one on Netflix here (titles repeat: "Animals"). */
+  function top10Match(kind, entry, done) {
+    tmdb('/search/' + kind + '?language=' + lang() + '&query=' + encodeURIComponent(entry.title), function (err, r) {
+      var hits = [], want = entry.title.toLowerCase();
+      for (var i = 0; !err && r.results && i < r.results.length && hits.length < 3; i++) if (r.results[i].backdrop_path) hits.push(r.results[i]);
+      if (!hits.length) { done(null); return; }
+      // The exact title first: "Ice Age" is the first film, not the sequel the search also ranks high.
+      function exact(h) { return [h.title, h.name, h.original_title, h.original_name].some(function (t) { return t && t.toLowerCase() === want; }); }
+      hits.sort(function (a, b) { return (exact(b) ? 1 : 0) - (exact(a) ? 1 : 0); });
+      var k = 0;
+      (function check() {
+        if (k >= hits.length) { done(hits[0]); return; }
+        var hit = hits[k++];
+        tmdb('/' + kind + '/' + hit.id + '/watch/providers', function (e2, w) {
+          var here = !e2 && w.results && w.results[REGION], flat = (here && here.flatrate) || [];
+          for (var j = 0; j < flat.length; j++) if (/netflix/i.test(flat[j].provider_name || '')) { done(hit); return; }
+          check();
+        });
+      })();
+    });
+  }
+
+  /** This week's Netflix Top 10 for 'movie' or 'tv', in rank order: done([pick with rank]). Checked twice a day. */
+  function netflixTop10(kind, done) {
+    if (!TOP10_URL || !KEY || !appFor('netflix')) { done([]); return; }
+    var fresh = top10 && top10.lang === I18N.lang && Date.now() - top10.at < 12 * 3600000 && Date.now() >= top10.at;
+    if (fresh) { done(top10[kind] || []); return; }
+    if (top10Waiting) { top10Waiting.push(function () { done((top10 && top10[kind]) || []); }); return; }
+    top10Waiting = [function () { done((top10 && top10[kind]) || []); }];
+    function finish() {
+      var waiting = top10Waiting;
+      top10Waiting = null;
+      for (var i = 0; i < waiting.length; i++) waiting[i]();
+    }
+    get(TOP10_URL, {Accept: 'application/json'}, function (err, o) {
+      if (err || !o || !o.week) { finish(); return; }
+      if (top10 && top10.week === o.week && top10.lang === I18N.lang) { top10.at = Date.now(); store('top10', top10); finish(); return; }
+      var next = {week: o.week, at: Date.now(), lang: I18N.lang, movie: [], tv: []}, jobs = [];
+      for (var f = 0; o.films && f < o.films.length; f++) jobs.push(['movie', o.films[f]]);
+      for (var t = 0; o.tv && t < o.tv.length; t++) jobs.push(['tv', o.tv[t]]);
+      each(jobs, function (job, more) {
+        top10Match(job[0], job[1], function (hit) {
+          var one = [];
+          if (hit) addPick(one, hit, job[0]);
+          if (one[0]) { one[0].rank = job[1].rank; one[0].app = 'netflix'; next[job[0]].push(one[0]); }
+          more();
+        });
+      }, function () {
+        top10 = next;
+        store('top10', top10);
+        finish();
+      });
+    });
+  }
+
+  // MARK: - Sandmännchen (ARD Mediathek)
+
+  var ARD = 'https://api.ardmediathek.de/page-gateway/pages/ard/';
+  var SANDMANN = 'Y3JpZDovL3JiYi1vbmxpbmUuZGUvc2FuZG1hbm4';   // crid://rbb-online.de/sandmann
+  var sandmann = [], sandmannAt = 0;
+
+  /** The latest episodes, newest first: done(error, [{id, title, date, image}]). Fetched again after an hour. */
+  function sandmannEpisodes(done) {
+    if (sandmann.length && Date.now() - sandmannAt < 3600000) { done(null, sandmann); return; }
+    get(ARD + 'grouping/' + SANDMANN + '?pageSize=40', {Accept: 'application/json'}, function (err, o) {
+      if (err) { done(err, sandmann); return; }
+      var teasers = (o.widgets && o.widgets[0] && o.widgets[0].teasers) || [], out = [], now = Date.now();
+      for (var i = 0; i < teasers.length; i++) {
+        var t = teasers[i], parts = (t.mediumTitle || '').split(' | '), at = Date.parse(t.broadcastedOn);
+        // Only the German broadcast: the show also lists the Sorbian ones ("Unser Sandmännchen (sorbisch)"), the
+        // signed ones ("... (mit Gebärdensprache)") and episodes announced for the coming days.
+        if (parts[1] !== 'Unser Sandmännchen' || /Gebärdensprache/.test(t.mediumTitle) || !(at <= now)) continue;
+        var img = t.images && t.images['16x9'] && t.images['16x9'].src;
+        var day = new Date(at), date = parts[2] || ((day.getDate() < 10 ? '0' : '') + day.getDate() + '.'
+            + (day.getMonth() < 9 ? '0' : '') + (day.getMonth() + 1) + '.' + day.getFullYear());   // older ones lack it
+        out.push({id: t.id, title: parts[0], date: date, at: at, image: img ? img.replace('{width}', '1920') : ''});
+      }
+      out.sort(function (a, b) { return b.at - a.at; });
+      if (!out.length) { done(new Error('no episodes'), sandmann); return; }
+      sandmann = out;
+      sandmannAt = Date.now();
+      done(null, sandmann);
+    });
+  }
+
+  /** An episode's video: the largest MP4 up to 1080p (the HLS playlist only when there's none). done(error, url). */
+  function sandmannVideo(id, done) {
+    get(ARD + 'item/' + id + '?devicetype=pc&embedded=false', {Accept: 'application/json'}, function (err, o) {
+      if (err) { done(err); return; }
+      var w = o.widgets && o.widgets[0], mc = w && w.mediaCollection && w.mediaCollection.embedded;
+      var streams = (mc && mc.streams) || [], best = '', height = 0, hls = '';
+      for (var i = 0; i < streams.length; i++) {
+        if (streams[i].kind !== 'main') continue;   // not the audio-described one
+        for (var j = 0; streams[i].media && j < streams[i].media.length; j++) {
+          var m = streams[i].media[j], h = m.maxVResolutionPx || 0;
+          if (m.mimeType === 'video/mp4' && h <= 1080 && h > height) { height = h; best = m.url; }
+          else if (/mpegurl/i.test(m.mimeType || '')) hls = hls || m.url;
+        }
+      }
+      if (best || hls) done(null, best || hls);
+      else done(new Error('no video'));
+    });
+  }
+
   // MARK: - Formatting
 
   function fmt(v, digits) {
@@ -516,7 +684,7 @@ var Data = (function () {
     city: Place.city,
     currency: CURRENCY,
     onChange: function (fn) { listeners.push(fn); },
-    setApps: function (apps) { installed = apps; },
+    setApps: function (apps) { installed = apps; providerIds = null; },
     appFor: appFor,
     refresh: function () { refreshWeather(); refreshPrices(); refreshRecs(); },
     settingsChanged: function () { pricesAt = 0; refreshPrices(); changed(); },
@@ -530,6 +698,11 @@ var Data = (function () {
     recsError: function () { return recsError; },
     picks: now,
     showcase: all,
+    browse: browse,
+    netflixTop10: netflixTop10,
+    details: details,
+    sandmannEpisodes: sandmannEpisodes,
+    sandmannVideo: sandmannVideo,
     image: function (path, size) { return path ? 'https://image.tmdb.org/t/p/' + (size || 'w1280') + path : ''; },
 
     /** Night at the location: from sunset to sunrise (the last forecast; without one, 6:00 and 18:00). */

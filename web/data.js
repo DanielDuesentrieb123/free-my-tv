@@ -545,11 +545,15 @@ var Data = (function () {
     });
   }
 
-  /** Page `page` (from 1) of the movies or shows ('movie' / 'tv') popular on the TV's apps: done(error, [pick], more). */
+  /**
+   * Page `page` (from 1) of the movies or shows ('movie' / 'tv') popular on the TV's apps, or of what's new there
+   * ('new'): done(error, [pick], more).
+   */
   function browse(kind, page, done) {
     if (!KEY) { done(new Error('no TMDB key'), [], false); return; }
     providers(function (err, ids) {
       if (err) { done(err, [], false); return; }
+      if (kind === 'new') { fresh(ids, page, done); return; }
       tmdb('/discover/' + kind + '?language=' + lang() + '&watch_region=' + REGION + '&with_watch_monetization_types=flatrate'
           + '&include_adult=false&sort_by=popularity.desc&page=' + page + '&with_watch_providers=' + encodeURIComponent(ids.join('|'))
           + (CONFIG.hideAnimation ? '&without_genres=' + ANIMATION : ''), function (e, r) {
@@ -557,6 +561,27 @@ var Data = (function () {
         var out = [];
         for (var j = 0; r.results && j < r.results.length; j++) addPick(out, r.results[j], kind);
         done(null, out, page < Math.min(r.total_pages || 1, 10));   // 10 pages: 200 titles is plenty to scroll
+      });
+    });
+  }
+
+  /**
+   * What's new on the TV's apps, most popular first: movies out in the last three months and shows with an episode in
+   * the last month (a new show or a new season), alternating. TMDB knows release dates, not when a service added a title.
+   */
+  function fresh(ids, page, done) {
+    var common = '&language=' + lang() + '&watch_region=' + REGION + '&with_watch_monetization_types=flatrate&include_adult=false'
+        + '&sort_by=popularity.desc&page=' + page + '&with_watch_providers=' + encodeURIComponent(ids.join('|'))
+        + (CONFIG.hideAnimation ? '&without_genres=' + ANIMATION : '');
+    tmdb('/discover/movie?vote_count.gte=5&primary_release_date.gte=' + day(-90) + '&primary_release_date.lte=' + day(0) + common, function (e1, r1) {
+      tmdb('/discover/tv?air_date.gte=' + day(-30) + '&air_date.lte=' + day(0) + common, function (e2, r2) {
+        if (e1 && e2) { done(e1, [], false); return; }
+        var movies = [], shows = [], out = [];
+        for (var i = 0; !e1 && r1.results && i < r1.results.length; i++) addPick(movies, r1.results[i], 'movie');
+        for (var j = 0; !e2 && r2.results && j < r2.results.length; j++) addPick(shows, r2.results[j], 'tv');
+        alternate(out, {}, movies, shows, 40);
+        var pages = Math.max(e1 ? 0 : r1.total_pages || 1, e2 ? 0 : r2.total_pages || 1);
+        done(null, out, page < Math.min(pages, 5));
       });
     });
   }

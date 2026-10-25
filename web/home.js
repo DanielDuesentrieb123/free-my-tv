@@ -1,6 +1,6 @@
 /*
  * The home screen for web-app TVs (LG webOS, Samsung Tizen), with the Android app's design and behavior (HomeView):
- *  - top: the "For You" title and the tabs (Explore, Movies, Shows); icon-only glass buttons at the right (Live TV,
+ *  - top: the "For You" title and the tabs (New releases, Movies, Shows); icon-only glass buttons at the right (Live TV,
  *    HDMI Inputs, Settings) and the crypto quotes at the end of the tab row;
  *  - three picks for this hour in the selected tab; the background is the first one's photo, blurred and almost white;
  *  - the glass shelf with the apps; ↓ opens the drawer (inputs, shortcuts, weather, prices); ↑ or Back closes it;
@@ -357,13 +357,13 @@
 
   // MARK: - Top: title, tabs, buttons, quotes
 
-  var TAB_KIND = [null, 'movie', 'tv'];
+  var TAB_KIND = ['new', 'movie', 'tv'];   // 'new': what's new on the TV's apps (the hour's picks until it loads)
 
   function renderTop() {
     $('title').textContent = tr('For You');
     var tabs = $('tabs');
     tabs.innerHTML = '';
-    var names = [tr('Explore'), tr('Movies'), tr('Shows')];
+    var names = [tr('New releases'), tr('Movies'), tr('Shows')];
     for (var i = 0; i < 3; i++) {
       var t = el('button', 'tab', tabs, names[i]);
       hover(t, Z.TOP, i);
@@ -394,7 +394,7 @@
 
   function renderCards() {
     var kind = TAB_KIND[st.tab], row = kind && carouselFor(kind);
-    var list = row && row.items.length ? row.items : Data.picks(kind);   // the hour's picks until the row has loaded
+    var list = row && row.items.length ? row.items : Data.picks(kind === 'new' ? null : kind);   // the hour's picks until the row loads
     var wide = !!(row && row.items.length);
     var holder = $('cards');
     setClass(body, 'no-picks', !list.length);
@@ -442,7 +442,7 @@
   function carouselFor(kind) {
     if (!Data.hasKey()) return null;
     var row = carousels[kind];
-    if (!row) { row = carousels[kind] = {items: [], page: 0, more: true, loading: false, ranked: false}; loadCarousel(kind); }
+    if (!row) { row = carousels[kind] = {items: [], page: 0, more: true, loading: false, ranked: kind === 'new'}; loadCarousel(kind); }
     return row;
   }
 
